@@ -17,11 +17,11 @@ MINIO_ENDPOINT = os.environ.get('MINIO_ENDPOINT', '')
 ACCESS_KEY = os.environ.get('MINIO_ACCESS_KEY', '')
 SECRET_KEY = os.environ.get('MINIO_SECRET_KEY', '')
 AUTH_TOKEN = os.environ.get('AUTH_TOKEN', '')
-es_user = os.getenv("ELASTIC_USER", "elastic")
+es_user = os.getenv("ELASTIC_USERNAME", "elastic")
 es_password = os.getenv("ELASTIC_PASSWORD", "")
 es = Elasticsearch([ELASTICSEARCH_URL], request_timeout=30, basic_auth=(es_user, es_password))
 
-vars = ['ELASTIC_URL', 'INDEX_PREFIX', 'MINIO_ENDPOINT', 'MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY', 'AUTH_TOKEN' ]
+vars = ['ELASTIC_URL', 'INDEX_PREFIX', 'MINIO_ENDPOINT', 'MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY', 'AUTH_TOKEN', 'ELASTIC_USERNAME', 'ELASTIC_PASSWORD' ]
 for v in vars:
     if os.environ.get(v, '') == '':
         print(f"Missing environment variable {v}")
@@ -102,13 +102,10 @@ def save_to_minio(data, bucket_name, prefix):
     table = pa.Table.from_pandas(df)
     pq.write_table(table, buffer)
     buffer.seek(0)
-    # print('Upload new Parquet data in append mode')
     minio_client.put_object(
         bucket_name, object_name, buffer, length=buffer.getbuffer().nbytes, content_type="application/octet-stream"
     )
-    # print(f"Data saved to Minio bucket={bucket_name} object={object_name}")
 
-from pprint import pprint
 
 def search_indexes(params):
     global index_pattern
@@ -138,20 +135,13 @@ def search_indexes(params):
         bodySearch["sort"].append({"time": "asc"})
     if len(query["bool"]["must"])>0:
         bodySearch['query']= query   
-    #pprint(params)
-    #pprint(bodySearch)
     response = es.search(
         index=index_pattern,
         body=bodySearch
     )
-    rc=0
     result = []
     for hit in response['hits']['hits']:
         result.append(hit['_source'])
-        rc+=1
-        if rc<2: pprint(hit['_source'])
-    #pprint(response)
-    #print(f"patter = {index_pattern}")
     return result
 
 def get_datalist(data):
@@ -187,8 +177,8 @@ def get_datalist(data):
             }
             edb.append(doc)
         except Exception as e:
-            pprint(rec)
             print(f"Fatal error saving bulk errors: {e}")
+            print(e.format_exc())
             time.sleep(5)
             os._exit(1)
     return edb
@@ -204,7 +194,6 @@ def process():
                 start = time.time()
                 data = get_datalist(documents)
                 regcount, failed = helpers.bulk(es, data)
-                #print(f"Bulk inserted success: {regcount} - fail: {len(failed)} - time {time.time()-start:.2f}s")
             except Exception as e:
                 print(f"Error: {e}")
                 try:
@@ -233,7 +222,6 @@ def index_single(data):
         print(f"Index '{index}' not found. Creating index...")
         es.indices.create(index=index)
     try:
-        # print("Writing to elasticsearch index={index}")
         resp = es.index(index=index, document=data)
     except Exception as e:
         print(f"Error: {e}")
@@ -241,71 +229,19 @@ def index_single(data):
 @app.route("/api/ingest", methods=["GET", "POST"])
 def ingest():
     global AUTH_TOKEN
-    if request.args.get('token', 'bad') != AUTH_TOKEN: 
-        # print(f"DEBUG AUTH_TOKEN={AUTH_TOKEN} and request.args.get = {request.args.get('token', 'bad')}")
-        return Response("Unauthorized", status=401)
+    if request.args.get('token', 'bad') != AUTH_TOKEN: return Response("Unauthorized", status=401)
     data = request.get_json()
     index(data)
     return Response("OK", status=200)
-    
+
 @app.get("/api/query")
 def query():
-    global AUTH_TOKEN
     if request.args.get('token', 'bad') != AUTH_TOKEN: return Response("Unauthorized", status=401)
-    data = search_indexes(request.args)
+    data = search_indexes(request.args)    
     return Response(json.dumps(data), status=200, headers={"Content-Type": "application/json"})
-
-'''PROXY_HOST = "http://logsearchapi.dataops.local"
-reqno=0        
-@app.route("/<path:path>", methods=["GET", "POST"])
-def proxy(path):
-    global reqno
-    url = f"{PROXY_HOST}/{path}"
-    
-    headers = {key: value for key, value in request.headers if key.lower() != 'host'}
-    data = request.get_json() if request.is_json else request.data
-    params = request.args.to_dict()
-    
-    #if path=='api/ingest':
-    #    index(data)
-    #elif path=='api/query':
-    #    data = search_indexes('audit_log_events-*', request.args)
-    #    return Response(json.dumps(data), status=200, headers={"Content-Type": "application/json"})
-
-    if request.method == "GET":
-        resp = requests.get(url, headers=headers, params=request.args)
-    else:
-        purl = url
-        if request.query_string != "":
-            purl+='?'+request.query_string.decode("utf-8")
-        resp = requests.post(purl, headers=headers, json=request.get_json() if request.is_json else request.form)
-    
-    if path!='api/ingest':
-        reqno+=1
-        log_to_file(f"/tmp/request-{reqno}.log", {
-            "timestamp": str(datetime.datetime.now()),
-            "method": request.method,
-            "path": path,
-            "headers": dict(request.headers),
-            "parameters": params,
-            "body": data.decode() if isinstance(data, bytes) else data
-        })
-        pprint(data)
-        log_to_file(f"/tmp/response-{reqno}.log", {
-            "timestamp": str(datetime.datetime.now()),
-            "status_code": resp.status_code,
-            "headers": dict(resp.headers),
-            "body": resp.text
-        })
-
-    excluded_headers = ["transfer-encoding", "content-encoding", "content-length"]
-    headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded_headers}
-    
-    return Response(resp.content, status=resp.status_code, headers=headers)
-'''
 
 thread = threading.Thread(target=process, daemon=True)
 thread.start()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=True)
