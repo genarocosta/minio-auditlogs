@@ -1,0 +1,103 @@
+services:
+  audit-logger:
+    image: genarocosta/minio-auditlogs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./app:/app
+    depends_on:
+      - elasticsearch
+      - kibana
+
+  elasticvue:
+    image: cars10/elasticvue
+    ports:
+      - "28080:8080"
+
+  elasticsearch:
+    image: elasticsearch:8.17.2
+    env_file:
+      - .env
+    environment:
+      - discovery.type=single-node
+      - ingest.geoip.downloader.enabled=false
+      - path.repo=/usr/share/elasticsearch/repository
+      - repositories.fs.location=/usr/share/elasticsearch/repository
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.enabled=true
+      - http.cors.enabled=true
+      - http.cors.allow-origin="http://127.0.0.1:28080"
+      - http.cors.allow-headers=X-Requested-With,Content-Type,Content-Length,Authorization
+      # - "_JAVA_OPTIONS=-XX:UseSVE=0"
+      #- "ES_JAVA_OPTS=-XX:Xint"
+      #- "CLI_JAVA_OPTS=-XX:Xint"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    restart: unless-stopped
+    volumes:
+      - sa_elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsSL", "http://${ELASTIC_USERNAME}:${ELASTIC_PASSWORD}@localhost:9200/_cluster/health?wait_for_status=green&timeout=5s"]
+      interval: 10s
+      retries: 10
+      start_period: 20s
+      timeout: 5s
+    ports:
+      - "29200:9200"
+    #  - "9300:9300"
+
+  minio:
+    image: quay.io/minio/minio
+    #restart: always
+    ports:
+      - "29001:9001"
+      - "29000:9000"
+    environment:
+      - MINIO_ROOT_USER
+      - MINIO_ROOT_PASSWORD
+      - MINIO_PROMETHEUS_URL
+      - MINIO_AUDIT_WEBHOOK_ENABLE_1
+      - MINIO_AUDIT_WEBHOOK_ENDPOINT_1
+      - MINIO_LOG_QUERY_URL
+      - MINIO_LOG_QUERY_AUTH_TOKEN
+    volumes:
+      - minio_data:/data
+      - ./create-bucket.sh:/usr/bin/create-bucket.sh
+    command: server /data --console-address ":9001"
+
+  s3store:
+    image: quay.io/minio/minio
+    #restart: always
+    ports:
+      - "39001:9001"
+      - "39000:9000"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY} 
+    volumes:
+      - s3store_data:/data
+      - ./create-bucket.sh:/usr/bin/create-bucket.sh
+    command: ["/usr/bin/create-bucket.sh & minio server /data --console-address :9090"]
+    entrypoint: ["/bin/sh", "-c"]
+
+  prometheus:
+    image: prom/prometheus
+    restart: unless-stopped
+    command: --config.file=/etc/prometheus/prometheus.yml
+    #ports:
+    #  - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prom_data:/prometheus
+
+volumes:
+  sa_elasticsearch_data:
+  minio_data:
+  s3store_data:
+  prom_data:

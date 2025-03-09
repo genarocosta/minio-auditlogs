@@ -1,0 +1,7 @@
+flask
+elasticsearch
+requests
+pandas
+pyarrow
+minio
+gunicorn
